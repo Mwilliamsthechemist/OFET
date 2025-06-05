@@ -1,0 +1,162 @@
+%% Clear and close everything
+clear;
+close all;
+
+%% Connect to instrument
+address = "USB0::0x2A8D::0x9501::MY60440104::0::INSTR";
+dev = visadev(address);
+
+%% General setup
+current_limit = 0.100; % 100 mA
+
+%% Output Curve Parameters
+vds_start = 42;
+vds_stop = -42;
+vds_step = -0.5;
+vgs_list = 40:-10:-40;
+vds_points = vds_start:vds_step:vds_stop;
+num_vds_points = length(vds_points);
+
+%% Transfer Curve Parameters
+vgs_forward = 42:-0.1:-42;
+vgs_reverse = -42:0.1:42;
+vds_fixed = -40;
+
+%% Initialize Instrument
+writeline(dev, '*RST'); pause(1);
+writeline(dev, '*CLS');
+
+writeline(dev, ':SOUR1:FUNC VOLT'); writeline(dev, ':SOUR1:VOLT 0');
+writeline(dev, ':SENS1:FUNC "CURR"');
+writeline(dev, [':SENS1:CURR:PROT ' num2str(current_limit)]);
+
+writeline(dev, ':SOUR2:FUNC VOLT'); writeline(dev, ':SOUR2:VOLT 0');
+writeline(dev, ':SENS2:FUNC "CURR"');
+writeline(dev, [':SENS2:CURR:PROT ' num2str(current_limit)]);
+
+writeline(dev, ':OUTP1 ON'); writeline(dev, ':OUTP2 ON'); pause(1);
+
+%% Output Curve Sweep
+disp('Starting Output Curve Sweep...');
+output_ids_data = [];
+for vg = vgs_list
+    writeline(dev, [':SOUR1:VOLT ' num2str(vg)]); pause(0.5);
+    vds_currents = zeros(1, num_vds_points);
+    for idx = 1:num_vds_points
+        writeline(dev, [':SOUR2:VOLT ' num2str(vds_points(idx))]);
+        pause(0.05);
+        writeline(dev, ':MEAS:CURR? (@2)');
+        vds_currents(idx) = str2double(readline(dev));
+    end
+    output_ids_data = [output_ids_data; vds_currents];
+end
+
+%% Transfer Curve Sweep (Forward + Reverse)
+disp('Starting Transfer Curve Sweep (Hysteresis)...');
+writeline(dev, [':SOUR2:VOLT ' num2str(vds_fixed)]); pause(0.5);
+transfer_ids_forward = zeros(1, length(vgs_forward));
+for idx = 1:length(vgs_forward)
+    writeline(dev, [':SOUR1:VOLT ' num2str(vgs_forward(idx))]);
+    pause(0.05);
+    writeline(dev, ':MEAS:CURR? (@2)');
+    transfer_ids_forward(idx) = str2double(readline(dev));
+end
+
+transfer_ids_reverse = zeros(1, length(vgs_reverse));
+for idx = 1:length(vgs_reverse)
+    writeline(dev, [':SOUR1:VOLT ' num2str(vgs_reverse(idx))]);
+    pause(0.05);
+    writeline(dev, ':MEAS:CURR? (@2)');
+    transfer_ids_reverse(idx) = str2double(readline(dev));
+end
+
+%% Decay Test (formerly "Time Degradation Test")
+disp('Starting Decay Test...');
+
+% Set initial voltages to 0 V
+writeline(dev, ':SOUR1:VOLT 0');
+writeline(dev, ':SOUR2:VOLT 0');
+pause(1);  % allow brief settling
+
+% Parameters
+sample_duration = 10;         % total recording time in seconds
+sample_rate = 50;             % samples per second
+num_samples = sample_duration * sample_rate;
+decay_time = linspace(0, sample_duration, num_samples);
+decay_currents = zeros(1, num_samples);
+
+transition_index = round(1 * sample_rate);  % Apply -40 V after 1 second
+
+% Start continuous recording
+disp('Recording decay during voltage transition...');
+tic;
+for i = 1:num_samples
+    if i == transition_index
+        writeline(dev, ':SOUR1:VOLT -40');
+        writeline(dev, ':SOUR2:VOLT -40');
+    end
+
+    writeline(dev, ':MEAS:CURR? (@2)');
+    decay_currents(i) = str2double(readline(dev));
+    
+    pause(1/sample_rate);
+end
+elapsed = toc;
+disp(['Decay test completed in ' num2str(elapsed) ' seconds.']);
+
+%% Turn off outputs and reset
+writeline(dev, ':SOUR1:VOLT 0');
+writeline(dev, ':SOUR2:VOLT 0');
+pause(1);
+writeline(dev, ':OUTP1 OFF');
+writeline(dev, ':OUTP2 OFF');
+
+%% Plot Output Curve
+figure;
+hold on;
+for i = 1:length(vgs_list)
+    plot(vds_points, output_ids_data(i,:), 'DisplayName', ['V_G = ' num2str(vgs_list(i)) 'V']);
+end
+xlabel('V_{DS} (V)'); ylabel('I_D (A)');
+title('Output Characteristics'); legend show; grid on;
+
+%% Plot Transfer Curve
+figure;
+plot(vgs_forward, transfer_ids_forward, '-b', 'DisplayName', 'Forward Sweep', 'LineWidth', 1.5); hold on;
+plot(vgs_reverse, transfer_ids_reverse, '-r', 'DisplayName', 'Reverse Sweep', 'LineWidth', 1.5);
+xlabel('V_{GS} (V)'); ylabel('I_D (A)');
+title(['Transfer Curve Hysteresis (V_{DS} = ' num2str(vds_fixed) 'V)']);
+legend show; grid on;
+
+%% Plot Decay Curve
+figure;
+plot(decay_time, decay_currents, 'k', 'LineWidth', 1.5);
+xlabel('Time (s)'); ylabel('I_D (A)');
+title('Decay at V_G = V_D = -40V'); grid on;
+
+%% Save to Excel
+timestamp = datestr(now,'yyyy-mm-dd_HH-MM-SS');
+filename = ['OFET_Sweep_' timestamp '.xlsx'];
+
+% Output Curve Sheet
+output_header = [{'V_DS (V)'} arrayfun(@(v) sprintf('I_D (V_G = %dV)', v), vgs_list, 'UniformOutput', false)];
+output_matrix = [vds_points.' output_ids_data.'];
+writecell(output_header, filename, 'Sheet', 'OutputCurve', 'Range', 'A1');
+writematrix(output_matrix, filename, 'Sheet', 'OutputCurve', 'Range', 'A2');
+
+% Transfer Curve Sheet
+transfer_header = {'V_GS (V)', 'I_D Forward (A)', 'I_D Reverse (A)'};
+transfer_matrix = [vgs_forward.' transfer_ids_forward.' transfer_ids_reverse.'];
+writecell(transfer_header, filename, 'Sheet', 'TransferCurve', 'Range', 'A1');
+writematrix(transfer_matrix, filename, 'Sheet', 'TransferCurve', 'Range', 'A2');
+
+% Decay Sheet
+decay_header = {'Time (s)', 'I_D (A)'};
+decay_matrix = [decay_time.' decay_currents.'];
+writecell(decay_header, filename, 'Sheet', 'Decay', 'Range', 'A1');
+writematrix(decay_matrix, filename, 'Sheet', 'Decay', 'Range', 'A2');
+
+disp(['All data saved to: ' filename]);
+
+%% Clean up
+clear dev;
