@@ -1,0 +1,148 @@
+Option Explicit
+
+Sub ImportDataFromMacFolder()
+    Dim folderPath As String
+    Dim fileName As String
+    Dim wsOutput As Worksheet, wsTransfer As Worksheet
+    Dim wsOutCol As Long, wsTransCol As Long
+    Dim colAImported As Boolean, colAImportedTrans As Boolean
+    Dim summaryRow As Long
+    Dim wbSource As Workbook
+    Dim tsArray() As String
+    Dim fileArray() As String
+    Dim i As Long, j As Long, temp As String
+    
+    ' Ask user to select a folder
+    folderPath = MacGetFolder()
+    If folderPath = "" Then
+        MsgBox "No folder selected.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Get list of all Excel files in the folder
+    fileName = Dir(folderPath & "*.xls*")
+    Do While fileName <> ""
+        ReDim Preserve fileArray(i)
+        fileArray(i) = fileName
+        i = i + 1
+        fileName = Dir()
+    Loop
+    
+    If i = 0 Then
+        MsgBox "No Excel files found in the selected folder.", vbExclamation
+        Exit Sub
+    End If
+    
+    ' Extract timestamps from filenames and sort arrays by timestamp
+    ReDim tsArray(UBound(fileArray))
+    For j = 0 To UBound(fileArray)
+        tsArray(j) = ExtractTimeStamp(fileArray(j))
+    Next j
+    Call SortArraysByTimeStamp(tsArray, fileArray)
+    
+    ' Create/clear the output sheets
+    On Error Resume Next
+    Set wsOutput = ThisWorkbook.Sheets("Outputs")
+    Set wsTransfer = ThisWorkbook.Sheets("Transfers")
+    On Error GoTo 0
+    If wsOutput Is Nothing Then
+        Set wsOutput = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsOutput.Name = "Outputs"
+    Else
+        wsOutput.Cells.Clear
+    End If
+    If wsTransfer Is Nothing Then
+        Set wsTransfer = ThisWorkbook.Sheets.Add(After:=ThisWorkbook.Sheets(ThisWorkbook.Sheets.Count))
+        wsTransfer.Name = "Transfers"
+    Else
+        wsTransfer.Cells.Clear
+    End If
+    wsOutCol = 2
+    wsTransCol = 2
+    colAImported = False
+    colAImportedTrans = False
+    
+    ' Loop through each file in sorted order
+    For j = 0 To UBound(fileArray)
+        Set wbSource = Workbooks.Open(folderPath & fileArray(j), False, True)
+        
+        ' === OutputCurve Extraction ===
+        With wbSource.Sheets("OutputCurve")
+            If Not colAImported Then
+                ' Import column A once
+                .Range("A:A").Copy wsOutput.Cells(1, 1)
+                wsOutput.Cells(1, 1).Value = "V_DS"
+                colAImported = True
+            End If
+            ' Find "I_D (V_G = 0V)" in row 1
+            Dim lastCol As Long, k As Long, idCol As Long
+            lastCol = .Cells(1, .Columns.Count).End(xlToLeft).Column
+            idCol = 0
+            For k = 1 To lastCol
+                If .Cells(1, k).Value = "I_D (V_G = 0V)" Then
+                    idCol = k
+                    Exit For
+                End If
+            Next k
+            If idCol > 0 Then
+                .Range(.Cells(1, idCol), .Cells(.Rows.Count, idCol).End(xlUp)).Copy wsOutput.Cells(1, wsOutCol)
+                wsOutput.Cells(1, wsOutCol).Value = tsArray(j)
+                wsOutCol = wsOutCol + 1
+            End If
+        End With
+        
+        ' === TransferCurve Extraction ===
+        With wbSource.Sheets("TransferCurve")
+            If Not colAImportedTrans Then
+                .Range("A:A").Copy wsTransfer.Cells(1, 1)
+                wsTransfer.Cells(1, 1).Value = "V_G"
+                colAImportedTrans = True
+            End If
+            ' Column B is "I_D Forward (A)"
+            .Range(.Cells(1, 2), .Cells(.Rows.Count, 2).End(xlUp)).Copy wsTransfer.Cells(1, wsTransCol)
+            wsTransfer.Cells(1, wsTransCol).Value = tsArray(j)
+            wsTransCol = wsTransCol + 1
+        End With
+        
+        wbSource.Close False
+    Next j
+    
+    MsgBox "Import complete!", vbInformation
+End Sub
+
+' Helper function to show Mac folder selection dialog
+Function MacGetFolder() As String
+    Dim script As String
+    Dim folderPath As String
+    script = "set selectedFolder to POSIX path of (choose folder with prompt ""Select a folder containing Excel files"")"
+    On Error Resume Next
+    folderPath = MacScript(script)
+    If Right(folderPath, 1) <> "/" And folderPath <> "" Then folderPath = folderPath & "/"
+    MacGetFolder = folderPath
+End Function
+
+' Helper function to extract timestamp from filename (assuming it's at the end before extension)
+Function ExtractTimeStamp(ByVal fileName As String) As String
+    Dim baseName As String, parts() As String
+    baseName = Left(fileName, InStrRev(fileName, ".") - 1)
+    parts = Split(baseName, "_")
+    ExtractTimeStamp = parts(UBound(parts))
+End Function
+
+' Sort fileArray and tsArray in ascending timestamp order (bubble sort for simplicity)
+Sub SortArraysByTimeStamp(ByRef tsArray() As String, ByRef fileArray() As String)
+    Dim i As Long, j As Long
+    Dim tempFile As String, tempTS As String
+    For i = LBound(tsArray) To UBound(tsArray) - 1
+        For j = i + 1 To UBound(tsArray)
+            If tsArray(i) > tsArray(j) Then
+                tempTS = tsArray(i)
+                tsArray(i) = tsArray(j)
+                tsArray(j) = tempTS
+                tempFile = fileArray(i)
+                fileArray(i) = fileArray(j)
+                fileArray(j) = tempFile
+            End If
+        Next j
+    Next i
+End Sub
